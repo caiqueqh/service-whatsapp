@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -23,7 +23,17 @@ async function startWhatsApp() {
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
+    let version = [2, 3000, 10175317]; // Fallback version
+    try {
+        const latest = await fetchLatestBaileysVersion();
+        version = latest.version;
+        console.log(`Using WA v${version.join('.')}, isLatest: ${latest.isLatest}`);
+    } catch (err) {
+        console.log('Erro ao buscar versão do WA, usando fallback:', err.message);
+    }
+
     sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: true,
         logger: pino({ level: 'silent' }),
