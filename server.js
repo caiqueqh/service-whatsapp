@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -17,27 +17,22 @@ let sock = null;
 let currentQrBase64 = null;
 let connectionState = 'DISCONNECTED'; // DISCONNECTED, QRCODE, CONNECTED
 
+const WA_VERSION = [2, 3000, 1027934701];
+
 async function startWhatsApp() {
     connectionState = 'CONNECTING';
     currentQrBase64 = null;
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
-    let version = [2, 3000, 10175317]; // Fallback version
-    try {
-        const latest = await fetchLatestBaileysVersion();
-        version = latest.version;
-        console.log(`Using WA v${version.join('.')}, isLatest: ${latest.isLatest}`);
-    } catch (err) {
-        console.log('Erro ao buscar versão do WA, usando fallback:', err.message);
-    }
+    console.log(`Iniciando conexão WhatsApp Web com versão WA v${WA_VERSION.join('.')}`);
 
     sock = makeWASocket({
-        version,
+        version: WA_VERSION,
         auth: state,
         printQRInTerminal: true,
         logger: pino({ level: 'silent' }),
-        browser: ['Sistema Qualitas', 'Chrome', '120.0.0']
+        browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
     sock.ev.on('creds.update', saveCreds);
