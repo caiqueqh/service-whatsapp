@@ -1,23 +1,26 @@
-const express = require('express');
-const cors = require('cors');
-const QRCode = require('qrcode');
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const pino = require('pino');
-const fs = require('fs');
-const path = require('path');
+import express from 'express';
+import cors from 'cors';
+import QRCode from 'qrcode';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import pino from 'pino';
+import fs from 'fs';
+import path from 'url';
+import pathModule from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = pathModule.dirname(__filename);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3002;
-const AUTH_FOLDER = path.join(__dirname, 'auth_session');
+const AUTH_FOLDER = pathModule.join(__dirname, 'auth_session');
 
 let sock = null;
 let currentQrBase64 = null;
 let connectionState = 'DISCONNECTED'; // DISCONNECTED, QRCODE, CONNECTED
-
-const WA_VERSION = [2, 3000, 1027934701];
 
 async function startWhatsApp() {
     connectionState = 'CONNECTING';
@@ -25,14 +28,16 @@ async function startWhatsApp() {
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
-    console.log(`Iniciando conexão WhatsApp Web com versão WA v${WA_VERSION.join('.')}`);
+    console.log(`Iniciando conexão WhatsApp Web com padrões do Baileys`);
 
-    sock = makeWASocket({
-        version: WA_VERSION,
+    sock = makeWASocket.default ? makeWASocket.default({
         auth: state,
         printQRInTerminal: true,
-        logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04']
+        logger: pino({ level: 'silent' })
+    }) : makeWASocket({
+        auth: state,
+        printQRInTerminal: true,
+        logger: pino({ level: 'silent' })
     });
 
     sock.ev.on('creds.update', saveCreds);
