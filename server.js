@@ -113,6 +113,12 @@ app.post('/send', async (req, res) => {
 
         const jid = cleanPhone + '@s.whatsapp.net';
 
+        // Valida se o número possui conta de WhatsApp ativa antes de enviar
+        const [result] = await sock.onWhatsApp(jid);
+        if (!result || !result.exists) {
+            return res.status(400).json({ success: false, error: 'Este número de telefone não possui uma conta de WhatsApp ativa.' });
+        }
+
         await sock.sendMessage(jid, { text: message });
         console.log(`✉️ Mensagem enviada com sucesso para ${cleanPhone}`);
 
