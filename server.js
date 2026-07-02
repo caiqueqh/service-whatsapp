@@ -111,18 +111,39 @@ app.post('/send', async (req, res) => {
             cleanPhone = '55' + cleanPhone;
         }
 
-        const jid = cleanPhone + '@s.whatsapp.net';
+        let jidsToTest = [cleanPhone + '@s.whatsapp.net'];
 
-        // Valida se o número possui conta de WhatsApp ativa antes de enviar
-        const [result] = await sock.onWhatsApp(jid);
-        if (!result || !result.exists) {
-            return res.status(400).json({ success: false, error: 'Este número de telefone não possui uma conta de WhatsApp ativa.' });
+        // Lógica para números do Brasil (DDI 55 com DDD de 2 dígitos)
+        if (cleanPhone.startsWith('55')) {
+            const semDDI = cleanPhone.slice(2);
+            if (semDDI.length === 11 && semDDI[2] === '9') {
+                // Tem 11 dígitos no formato Brasil (DDD + 9 + 8 dígitos). Testar também sem o 9º dígito.
+                const varSemNove = '55' + semDDI.slice(0, 2) + semDDI.slice(3);
+                jidsToTest.push(varSemNove + '@s.whatsapp.net');
+            } else if (semDDI.length === 10) {
+                // Tem 10 dígitos (DDD + 8 dígitos). Testar também com o 9º dígito.
+                const varComNove = '55' + semDDI.slice(0, 2) + '9' + semDDI.slice(2);
+                jidsToTest.unshift(varComNove + '@s.whatsapp.net'); // Prioriza testar com 9
+            }
         }
 
-        await sock.sendMessage(jid, { text: message });
-        console.log(`✉️ Mensagem enviada com sucesso para ${cleanPhone}`);
+        let validJid = null;
+        for (const jid of jidsToTest) {
+            const [result] = await sock.onWhatsApp(jid);
+            if (result && result.exists) {
+                validJid = result.jid || jid;
+                break;
+            }
+        }
 
-        return res.status(200).json({ success: true, jid });
+        if (!validJid) {
+            return res.status(400).json({ success: false, error: 'Este número de telefone não possui uma conta de WhatsApp ativa no formato verificado.' });
+        }
+
+        await sock.sendMessage(validJid, { text: message });
+        console.log(`✉️ Mensagem enviada com sucesso para ${validJid}`);
+
+        return res.status(200).json({ success: true, jid: validJid });
     } catch (err) {
         console.error('Erro no envio:', err);
         return res.status(500).json({ success: false, error: err.message });
