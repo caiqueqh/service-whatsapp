@@ -18,9 +18,65 @@ app.use(express.json());
 const PORT = process.env.PORT || 3002;
 const AUTH_FOLDER = pathModule.join(__dirname, 'auth_session');
 
+// URL do sistema Qualitas que recebe as mensagens (ex: https://sistema/api/whatsapp/webhook)
+const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+
 let sock = null;
 let currentQrBase64 = null;
 let connectionState = 'DISCONNECTED'; // DISCONNECTED, QRCODE, CONNECTED
+
+// Extrai o texto de qualquer um dos formatos de mensagem que o Baileys entrega
+function extrairTexto(msg) {
+    const m = msg?.message;
+    if (!m) return '';
+
+    return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        m.documentMessage?.caption ||
+        m.buttonsResponseMessage?.selectedDisplayText ||
+        m.listResponseMessage?.title ||
+        m.templateButtonReplyMessage?.selectedDisplayText ||
+        ''
+    );
+}
+
+// Envia a mensagem recebida/enviada para o sistema Qualitas.
+// Tem retry porque um "OK" perdido some para sempre: o sistema nunca marca o candidato como confirmado.
+async function notificarSistema(payload, tentativa = 1) {
+    if (!WEBHOOK_URL) {
+        console.log('⚠️ WEBHOOK_URL vazia — mensagem NAO repassada ao sistema.');
+        return;
+    }
+
+    try {
+        const res = await fetch(WEBHOOK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-webhook-secret': WEBHOOK_SECRET
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+
+        console.log(`✅ Webhook OK (${res.status}) texto="${payload.texto}"`);
+    } catch (err) {
+        console.error(`⚠️ Falha ao notificar o sistema (tentativa ${tentativa}):`, err.message);
+
+        if (tentativa < 3) {
+            setTimeout(() => notificarSistema(payload, tentativa + 1), tentativa * 2000);
+        } else {
+            console.error('❌ Webhook descartado após 3 tentativas:', JSON.stringify(payload));
+        }
+    }
+}
 
 async function startWhatsApp() {
     connectionState = 'CONNECTING';
@@ -41,6 +97,46 @@ async function startWhatsApp() {
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // Repassa para o sistema toda mensagem trocada (recebida e enviada),
+    // para montar o histórico da conversa e detectar a confirmação "OK".
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        console.log(`📥 messages.upsert type=${type} qtd=${messages.length}`);
+
+        for (const msg of messages) {
+            const jid = msg.key?.remoteJid || '';
+
+            // Ignora grupos, status e broadcasts — só conversa individual.
+            if (!jid.endsWith('@s.whatsapp.net')) continue;
+
+            const texto = extrairTexto(msg);
+            if (!texto) continue;
+
+            const ts = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
+
+            // 'notify' = mensagem nova ao vivo. 'append' = sincronização (histórico
+            // ou mensagens que chegaram durante a reconexão que segue o erro 515).
+            // O 'append' só é aceito se for recente, para pegar um "ok" atrasado
+            // sem reprocessar o histórico inteiro a cada reconexão.
+            const recente = ts > Math.floor(Date.now() / 1000) - 600;
+
+            if (type !== 'notify' && !recente) {
+                console.log(`   ⏭️ ignorada (type=${type}, antiga) de=${jid.split('@')[0]}`);
+                continue;
+            }
+
+            console.log(`   ↳ de=${jid.split('@')[0]} fromMe=${!!msg.key?.fromMe} texto="${texto}"`);
+
+            await notificarSistema({
+                jid,
+                telefone: jid.split('@')[0],
+                fromMe: !!msg.key?.fromMe,
+                texto,
+                messageId: msg.key?.id,
+                timestamp: ts
+            });
+        }
+    });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -140,10 +236,10 @@ app.post('/send', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Este número de telefone não possui uma conta de WhatsApp ativa no formato verificado.' });
         }
 
-        await sock.sendMessage(validJid, { text: message });
+        const sent = await sock.sendMessage(validJid, { text: message });
         console.log(`✉️ Mensagem enviada com sucesso para ${validJid}`);
 
-        return res.status(200).json({ success: true, jid: validJid });
+        return res.status(200).json({ success: true, jid: validJid, messageId: sent?.key?.id || null });
     } catch (err) {
         console.error('Erro no envio:', err);
         return res.status(500).json({ success: false, error: err.message });
