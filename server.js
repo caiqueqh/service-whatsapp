@@ -164,10 +164,11 @@ async function startWhatsApp() {
             }
 
             // Telefone real: no formato novo (@lid) o número do JID NÃO é o
-            // telefone — ele vem nos campos senderPn/participantPn. No formato
-            // antigo (@s.whatsapp.net) o próprio JID já é o número.
+            // telefone. O número verdadeiro vem em remoteJidAlt, no formato antigo
+            // (ex.: 5515981462845@s.whatsapp.net). No @s.whatsapp.net puro, o
+            // próprio JID já é o número.
             const telefone = String(
-                msg.key?.senderPn || msg.key?.participantPn || jid
+                msg.key?.remoteJidAlt || msg.key?.senderPn || msg.key?.participantPn || jid
             ).split('@')[0];
 
             console.log(`   ↳ de=${telefone} (jid=${jid}) fromMe=${!!msg.key?.fromMe} texto="${texto}"`);
