@@ -26,10 +26,31 @@ let sock = null;
 let currentQrBase64 = null;
 let connectionState = 'DISCONNECTED'; // DISCONNECTED, QRCODE, CONNECTED
 
+// Desembrulha os invólucros que o WhatsApp coloca por fora do conteúdo real:
+// mensagens temporárias (ephemeral), ver-uma-vez, e as enviadas por outro
+// dispositivo do mesmo usuário. Sem isso o texto fica um nível abaixo e some.
+function conteudoReal(message) {
+    let m = message;
+
+    for (let i = 0; i < 5 && m; i++) {
+        const interno =
+            m.ephemeralMessage?.message ||
+            m.viewOnceMessage?.message ||
+            m.viewOnceMessageV2?.message ||
+            m.viewOnceMessageV2Extension?.message ||
+            m.documentWithCaptionMessage?.message ||
+            m.deviceSentMessage?.message
+
+        if (!interno) break;
+        m = interno;
+    }
+
+    return m || {};
+}
+
 // Extrai o texto de qualquer um dos formatos de mensagem que o Baileys entrega
 function extrairTexto(msg) {
-    const m = msg?.message;
-    if (!m) return '';
+    const m = conteudoReal(msg?.message);
 
     return (
         m.conversation ||
@@ -110,7 +131,18 @@ async function startWhatsApp() {
             if (!jid.endsWith('@s.whatsapp.net')) continue;
 
             const texto = extrairTexto(msg);
-            if (!texto) continue;
+            if (!texto) {
+                // Diagnóstico: mensagem recebida que não rendeu texto. Mostra as
+                // chaves do conteúdo (para descobrir um formato novo) ou sinaliza
+                // 'null' quando msg.message veio vazio (falha de descriptografia).
+                if (!msg.key?.fromMe) {
+                    const chaves = msg.message
+                        ? Object.keys(conteudoReal(msg.message)).join(',')
+                        : 'null(descriptografia?)'
+                    console.log(`   ❓ recebida sem texto de=${jid.split('@')[0]} conteudo=[${chaves}] stub=${msg.messageStubType ?? '-'}`)
+                }
+                continue;
+            }
 
             const ts = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
 
