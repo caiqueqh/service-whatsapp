@@ -127,8 +127,14 @@ async function startWhatsApp() {
         for (const msg of messages) {
             const jid = msg.key?.remoteJid || '';
 
+            // DIAGNÓSTICO: mostra a key inteira antes de qualquer filtro, para
+            // enxergar o formato do JID recebido (ex.: @lid no WhatsApp novo) e
+            // se o telefone real vem junto em algum campo.
+            console.log(`   🔎 key=${JSON.stringify(msg.key)}`);
+
             // Ignora grupos, status e broadcasts — só conversa individual.
-            if (!jid.endsWith('@s.whatsapp.net')) continue;
+            // Aceita @s.whatsapp.net (formato antigo) e @lid (novo identificador).
+            if (!jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@lid')) continue;
 
             const texto = extrairTexto(msg);
             if (!texto) {
@@ -157,11 +163,18 @@ async function startWhatsApp() {
                 continue;
             }
 
-            console.log(`   ↳ de=${jid.split('@')[0]} fromMe=${!!msg.key?.fromMe} texto="${texto}"`);
+            // Telefone real: no formato novo (@lid) o número do JID NÃO é o
+            // telefone — ele vem nos campos senderPn/participantPn. No formato
+            // antigo (@s.whatsapp.net) o próprio JID já é o número.
+            const telefone = String(
+                msg.key?.senderPn || msg.key?.participantPn || jid
+            ).split('@')[0];
+
+            console.log(`   ↳ de=${telefone} (jid=${jid}) fromMe=${!!msg.key?.fromMe} texto="${texto}"`);
 
             await notificarSistema({
                 jid,
-                telefone: jid.split('@')[0],
+                telefone,
                 fromMe: !!msg.key?.fromMe,
                 texto,
                 messageId: msg.key?.id,
