@@ -1,7 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import QRCode from 'qrcode';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import makeWASocket, {
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    Browsers
+} from '@whiskeysockets/baileys';
 import pino from 'pino';
 import fs from 'fs';
 import path from 'url';
@@ -24,7 +29,40 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 
 let sock = null;
 let currentQrBase64 = null;
-let connectionState = 'DISCONNECTED'; // DISCONNECTED, QRCODE, CONNECTED
+let connectionState = 'DISCONNECTED'; // DISCONNECTED, CONNECTING, QRCODE, CONNECTED
+
+// Último motivo de queda, exposto no /status. Sem isso uma falha de conexão
+// vira só um "conectando" eterno na tela, sem pista nenhuma do que aconteceu.
+let ultimoErro = null;
+
+// Reconexão com espera crescente: quando o WhatsApp recusa a conexão o erro se
+// repete, e tentar de 3 em 3 segundos para sempre só gera ruído no log.
+let tentativasReconexao = 0;
+const ESPERA_INICIAL_MS = 3000;
+const ESPERA_MAXIMA_MS = 60000;
+
+function agendarReconexao(imediata = false) {
+    if (imediata) {
+        tentativasReconexao = 0;
+        setTimeout(startWhatsApp, 2000);
+        return;
+    }
+
+    const espera = Math.min(
+        ESPERA_INICIAL_MS * 2 ** tentativasReconexao,
+        ESPERA_MAXIMA_MS
+    );
+    tentativasReconexao++;
+
+    console.log(`🔄 Nova tentativa de conexão em ${espera / 1000}s (tentativa ${tentativasReconexao}).`);
+    setTimeout(startWhatsApp, espera);
+}
+
+function limparSessao() {
+    if (fs.existsSync(AUTH_FOLDER)) {
+        fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+    }
+}
 
 // Desembrulha os invólucros que o WhatsApp coloca por fora do conteúdo real:
 // mensagens temporárias (ephemeral), ver-uma-vez, e as enviadas por outro
@@ -105,17 +143,31 @@ async function startWhatsApp() {
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
-    console.log(`Iniciando conexão WhatsApp Web com padrões do Baileys`);
+    // A versão do WhatsApp Web PRECISA ser informada. A que vem embutida no
+    // Baileys envelhece a cada release e o WhatsApp derruba cliente velho com
+    // "405 Connection Failure" — antes mesmo de emitir o QR Code, o que deixa a
+    // tela num "conectando" que nunca termina. Por isso buscamos a atual em vez
+    // de cravar um número no código, que voltaria a vencer daqui uns meses.
+    let version;
 
-    sock = makeWASocket.default ? makeWASocket.default({
+    try {
+        ({ version } = await fetchLatestBaileysVersion());
+        console.log(`Iniciando conexão WhatsApp Web com versão WA v${version.join('.')}`);
+    } catch (err) {
+        console.error('⚠️ Não foi possível buscar a versão atual do WhatsApp Web:', err.message);
+        console.log('Iniciando com a versão embutida no Baileys (pode dar 405 se estiver defasada).');
+    }
+
+    const config = {
         auth: state,
-        printQRInTerminal: true,
+        browser: Browsers.ubuntu('Chrome'),
         logger: pino({ level: 'silent' })
-    }) : makeWASocket({
-        auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' })
-    });
+    };
+
+    if (version) config.version = version;
+
+    const criarSocket = makeWASocket.default || makeWASocket;
+    sock = criarSocket(config);
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -190,28 +242,43 @@ async function startWhatsApp() {
         if (qr) {
             connectionState = 'QRCODE';
             currentQrBase64 = await QRCode.toDataURL(qr);
+            ultimoErro = null;
             console.log('📱 Novo QR Code gerado. Pronto para escanear.');
         }
 
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('⚠️ Conexão fechada devido a:', lastDisconnect?.error, ', Reconectando:', shouldReconnect);
-            
+            const codigo = lastDisconnect?.error?.output?.statusCode;
+            console.log('⚠️ Conexão fechada devido a:', lastDisconnect?.error);
+
             connectionState = 'DISCONNECTED';
             currentQrBase64 = null;
 
-            if (shouldReconnect) {
-                setTimeout(startWhatsApp, 3000);
+            if (codigo === DisconnectReason.loggedOut) {
+                // Sessão morta de vez: só recomeçando do zero sai QR Code novo.
+                ultimoErro = 'Sessão encerrada pelo celular. Escaneie o QR Code de novo.';
+                console.log('❌ Logout. Limpando a pasta de sessão para gerar um QR Code novo.');
+                limparSessao();
+                agendarReconexao(true);
+            } else if (codigo === DisconnectReason.connectionReplaced) {
+                // Outra instância assumiu a sessão; reconectar aqui só faz as
+                // duas brigarem, derrubando uma à outra em looping.
+                ultimoErro = 'Outra sessão do WhatsApp assumiu a conexão. Reinicie o serviço se quiser retomar aqui.';
+                console.log('⛔ Sessão substituída por outra instância. Não vou reconectar.');
+            } else if (codigo === 405) {
+                // O WhatsApp recusou a conexão. Normalmente é versão do WA Web
+                // defasada — apagar a sessão aqui não ajuda em nada e ainda
+                // obrigaria a ler o QR de novo à toa.
+                ultimoErro = 'O WhatsApp recusou a conexão (405). Verifique se a versão do WhatsApp Web está atualizada.';
+                agendarReconexao();
             } else {
-                console.log('❌ Sessão desconectada permanentemente (Logout). Limpando pasta de sessão.');
-                if (fs.existsSync(AUTH_FOLDER)) {
-                    fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-                }
-                setTimeout(startWhatsApp, 2000);
+                ultimoErro = lastDisconnect?.error?.message || 'Conexão perdida.';
+                agendarReconexao();
             }
         } else if (connection === 'open') {
             connectionState = 'CONNECTED';
             currentQrBase64 = null;
+            ultimoErro = null;
+            tentativasReconexao = 0;
             console.log('✅ WhatsApp Web Conectado com Sucesso!');
         }
     });
@@ -229,7 +296,8 @@ app.get('/', (req, res) => {
 app.get('/status', (req, res) => {
     res.status(200).json({
         state: connectionState,
-        qrcode: currentQrBase64
+        qrcode: currentQrBase64,
+        error: ultimoErro
     });
 });
 
